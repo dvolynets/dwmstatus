@@ -22,6 +22,8 @@ char *tzutc = "UTC";
 char *tzberlin = "Europe/Berlin";
 
 static Display *dpy;
+static Window win;
+static GC gc;
 
 char *
 smprintf(char *fmt, ...)
@@ -74,6 +76,65 @@ mktimes(char *fmt, char *tzname)
 	return smprintf("%s", buf);
 }
 
+void drawtext(const char* text, const char* fonttype, int x, int y, int screen)
+{
+	Font font = XLoadFont(dpy, fonttype);
+	XSetFont(dpy, gc, font);
+	XSetForeground(dpy, gc, BlackPixel(dpy,screen));
+	XDrawString(dpy, win, gc, x, y, text, strlen(text));
+	XUnloadFont(dpy, font);
+}
+
+void simplenotification(int batterylevel, int charging)
+{
+	if (win) {
+		XDestroyWindow(dpy, win);
+		win = 0;
+		return;
+	}
+
+	if (charging || batterylevel > 30) {
+		return;
+	}
+
+	int screen = DefaultScreen(dpy);
+	int dpywidth = DisplayWidth(dpy, screen);
+	int dpyheight = DisplayHeight(dpy, screen);
+
+	int offset = 25;
+	int winwidth = (dpywidth / 4);
+	int winheight = (dpyheight / 9);
+
+	int x = dpywidth - winwidth - offset;
+	int y = offset;
+
+	win = XCreateSimpleWindow(
+		dpy, RootWindow(dpy, screen),
+		x, y, winwidth, winheight, 2,
+		BlackPixel(dpy, screen),
+		0xbbbbbb
+	);
+
+	XSetTransientForHint(dpy, win, RootWindow(dpy, screen));
+	XMapWindow(dpy, win);
+	XSelectInput(dpy, win, ExposureMask);
+
+	gc = XCreateGC(dpy,win,0,NULL);
+	XEvent event;
+
+	while(1) {
+		XNextEvent(dpy, &event);
+		if (event.xany.window == win && event.type == Expose) {
+			break;
+		}
+	}
+
+	drawtext("LOW BATTERY LEVEL, TIME TO PLUG IN CHARGE DEVICE", "fixed", offset*3, offset*2, screen);
+	drawtext(">>>>", "cursor", offset*7, offset*3, screen);
+
+	XFreeGC(dpy, gc);
+}
+
 void
 setstatus(char *str)
 {
@@ -114,7 +175,7 @@ readfile(char *base, char *file)
 }
 
 char *
-getbattery(char *base)
+getbattery(char *base, int* batterylevel, int* charging)
 {
 	char *co, status;
 	int descap, remcap;
@@ -152,15 +213,19 @@ getbattery(char *base)
 	co = readfile(base, "status");
 	if (!strncmp(co, "Discharging", 11)) {
 		status = '-';
+		*charging = 0;
 	} else if(!strncmp(co, "Charging", 8)) {
 		status = '+';
+		*charging = 1;
 	} else {
 		status = '?';
+		*charging = 0;
 	}
 
 	if (remcap < 0 || descap < 0)
 		return smprintf("invalid");
 
+	*batterylevel = ((float)remcap / (float)descap) * 100;
 	return smprintf("%.0f%%%c", ((float)remcap / (float)descap) * 100, status);
 }
 
@@ -209,14 +274,18 @@ main(void)
 	char *t1;
 	char *kbmap;
 
+	int batterylevel, charging;
+
+	win = 0;
+
 	if (!(dpy = XOpenDisplay(NULL))) {
 		fprintf(stderr, "dwmstatus: cannot open display.\n");
 		return 1;
 	}
 
-	for (;;sleep(30)) {
+	for (;;sleep(60)) {
 		avgs = loadavg();
-		bat = getbattery("/sys/class/power_supply/BAT0");
+		bat = getbattery("/sys/class/power_supply/BAT1", &batterylevel, &charging);
 		tmar = mktimes("%H:%M", tzargentina);
 		tmutc = mktimes("%H:%M", tzutc);
 		tmbln = mktimes("KW %W %a %d %b %H:%M %Z %Y", tzberlin);
@@ -227,6 +296,8 @@ main(void)
 		status = smprintf("K:%s T:%s|%s L:%s B:%s A:%s U:%s %s",
 				kbmap, t0, t1, avgs, bat, tmar, tmutc,
 				tmbln);
+
+		simplenotification(batterylevel, charging);
 		setstatus(status);
 
 		free(kbmap);
@@ -238,6 +309,10 @@ main(void)
 		free(tmutc);
 		free(tmbln);
 		free(status);
+	}
+
+	if (win) {
+		XDestroyWindow(dpy, win);
 	}
 
 	XCloseDisplay(dpy);
